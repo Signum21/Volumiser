@@ -30,6 +30,7 @@ namespace DiscImage.EbsDiscTest {
 
         static string PathSeparator;
 
+        static bool obfuscate_g = false;
 
         static VirtualDisk GetEBSDiskImage(string snapshotId, string profile, string awsAccessKey, string awsSecret, string region) {
 
@@ -63,6 +64,7 @@ namespace DiscImage.EbsDiscTest {
             string command = null;
             string image = null;
             string path = "";
+            bool obfuscate = false;
 
             OptionSet option_set = new OptionSet()
                 .Add("h|help", "Display this help", v => showHelp = v != null)
@@ -72,7 +74,8 @@ namespace DiscImage.EbsDiscTest {
                 .Add("awsregion=", "AWS region", v => awsRegion = v)
                 .Add("command=", "The command to execute: [volumes|file_list|ls|extract]", v => command = v)
                 .Add("image=", @"The path to the virtual disk, e.g. C:\temp\backup.vhdx or ebs://snapshotid", v => image = v)
-                .Add("path=", @"Volume and path to query within the virtual disk filesystem ", v => path = v);
+                .Add("path=", @"Volume and path to query within the virtual disk filesystem ", v => path = v)
+                .Add("obfuscate", @"Reverse the filename and the first 50 bytes of the extracted file to avoid static analysis ", v => obfuscate = v != null);
 
             try {
 
@@ -97,6 +100,10 @@ namespace DiscImage.EbsDiscTest {
             if (showHelp) {
                 option_set.WriteOptionDescriptions(Console.Out);
                 return;
+            }
+
+            if(obfuscate) {
+                obfuscate_g = obfuscate;
             }
 
             DiscUtils.Containers.SetupHelper.SetupContainers();
@@ -172,7 +179,21 @@ namespace DiscImage.EbsDiscTest {
 
                             var fileStream = fs.OpenFile(filePath, FileMode.Open, FileAccess.Read);
                             Console.WriteLine($"[+] Opened file with path {filePath} for with size: {GetHumanSize(fileStream.Length)}");
-                            File.WriteAllBytes(Path.GetFileName(filePath), StreamUtilities.ReadExactly(fileStream, (int)fileStream.Length));
+                            string fileName = Path.GetFileName(filePath);
+
+                            if (obfuscate)
+                            {
+                                string reversedFileName = new string(fileName.Reverse().ToArray());
+                                var outputFile = File.Create(reversedFileName);
+                                byte[] buffer = StreamUtilities.ReadExactly(fileStream, (int)Math.Min(50, fileStream.Length));
+                                Array.Reverse(buffer);
+                                outputFile.Write(buffer, 0, buffer.Length);
+                                fileStream.CopyTo(outputFile, 20 * 1024 * 1024);
+                            }
+                            else
+                            {
+                                File.WriteAllBytes(fileName, StreamUtilities.ReadExactly(fileStream, (int)fileStream.Length));
+                            }
                         }
                     } else if (command == "file_list") {
                         foreach (var volume in VolumeManager.GetLogicalVolumes()) {
@@ -293,18 +314,26 @@ namespace DiscImage.EbsDiscTest {
         }
 
         static private async Task DownloadFile(string volumePath) {
-
             using (var fileStream = CurrentFileSystem.OpenFile(volumePath, FileMode.Open, FileAccess.Read)) {
-                using (var outputStream = new FileStream(Path.GetFileName(volumePath), FileMode.OpenOrCreate, FileAccess.ReadWrite)) {
+                string ogFileName = Path.GetFileName(volumePath);
+                string fileName = obfuscate_g ? new string(ogFileName.Reverse().ToArray()) : ogFileName;
+
+                using (var outputStream = new FileStream(fileName, FileMode.OpenOrCreate, FileAccess.ReadWrite)) {
                     byte[] buffer = new byte[512 * 1024];
                     long totalRead = 0;
+                    bool firstChunk = true;
 
                     while (fileStream.Position < fileStream.Length) {
                         int readSize = await fileStream.ReadAsync(buffer, 0, buffer.Length);
+
+                        if (obfuscate_g && firstChunk) {
+                            Array.Reverse(buffer, 0, Math.Min(50, readSize));
+                            firstChunk = false;
+                        }
                         await outputStream.WriteAsync(buffer, 0, readSize);
                         totalRead += readSize;
                         float progress = (totalRead / (float)fileStream.Length) * 100;
-                        UI.DownloadLabel = $"Downloading ({progress:0.0}%): {volumePath}";  
+                        UI.DownloadLabel = $"Downloading ({progress:0.0}%): {volumePath}";
                     }
                 }
             }
@@ -362,12 +391,12 @@ namespace DiscImage.EbsDiscTest {
                                 if(DownloadTask != null) {
                                     DownloadTask = DownloadTask.ContinueWith(t => DownloadFile(selectedFile)).ContinueWith(t => {
                                         DownloadTask = null;
-                                        UI.DownloadLabel = "Downloads Complete";
+                                        UI.DownloadLabel = " | Downloads Complete";
                                     });
                                 } else {
                                     DownloadTask = DownloadFile(selectedFile).ContinueWith(t => {
                                         DownloadTask = null;
-                                        UI.DownloadLabel = "Downloads Complete";
+                                        UI.DownloadLabel = " | Downloads Complete";
                                     });
                                 }                                                               
                             }
